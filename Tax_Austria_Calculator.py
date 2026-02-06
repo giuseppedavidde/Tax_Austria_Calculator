@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from oekb_scraper import fetch_oekb_kest
 
 st.set_page_config(page_title="ETF Tax Calculator Austria", layout="wide")
 st.title("ETF TAX Calculator AUSTRIA")
@@ -20,9 +21,18 @@ st.header("Input Data")
 col1, col2 = st.columns(2)
 with col1:
     isin = st.text_input("ETF ISIN", value="")
+    kest_auto = None
+    meldedatum = None
     if isin:
         oekb_url = f"https://my.oekb.at/kapitalmarkt-services/kms-output/fonds-info/sd/af/f?isin={isin}"
         st.markdown(f"[Open OeKB page for this ISIN]({oekb_url})", unsafe_allow_html=True)
+        if st.button("Fetch KESt from OeKB", key="fetch_kest"):
+            with st.spinner("Fetching KESt from OeKB..."):
+                kest_auto, meldedatum, stmId = fetch_oekb_kest(isin)
+            if kest_auto is not None:
+                st.success(f"KESt found: {kest_auto} (Meldedatum: {meldedatum})")
+            else:
+                st.warning("KESt value not found for this ISIN.")
     shares = st.number_input("Number of Shares", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
     etf_initial_cost = st.number_input("ETF Initial Cost (EUR)", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
     value_year_before = st.number_input("ETF Value Year Before (EUR)", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
