@@ -1,4 +1,4 @@
 modules/__pycache__/*.pyc
 *.png
-
-__pycache__/oekb_scraper.cpython-313.pyc
+.venv
+__pycache__/*
