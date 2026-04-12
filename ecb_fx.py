@@ -32,10 +32,14 @@ import requests
 
 _ECB_API_BASE = "https://data-api.ecb.europa.eu/service/data"
 _SERIES_KEY = "EXR/D.USD.EUR.SP00.A"
-_MAX_LOOKBACK_DAYS = 10  # how many days back to search if the exact date is a non-trading day
+_MAX_LOOKBACK_DAYS = (
+    10  # how many days back to search if the exact date is a non-trading day
+)
 
 
-def fetch_usdeur_for_date(target_date: datetime.date) -> tuple[float | None, datetime.date | None]:
+def fetch_usdeur_for_date(
+    target_date: datetime.date,
+) -> tuple[float | None, datetime.date | None]:
     """
     Fetch the ECB reference USD/EUR exchange rate for `target_date`.
 
@@ -67,7 +71,7 @@ def fetch_usdeur_for_date(target_date: datetime.date) -> tuple[float | None, dat
     try:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-    except requests.RequestException as exc:
+    except requests.RequestException:
         return None, None
 
     content = resp.text.strip()
@@ -87,10 +91,50 @@ def fetch_usdeur_for_date(target_date: datetime.date) -> tuple[float | None, dat
     df = df.sort_values("TIME_PERIOD", ascending=False)
 
     # Pick the most recent available rate on or before target_date
-    row = df[df["TIME_PERIOD"] <= target_date].iloc[0] if not df[df["TIME_PERIOD"] <= target_date].empty else None
-    if row is None:
+    eligible = df[df["TIME_PERIOD"] <= target_date]
+    if eligible.empty:
         return None, None
 
+    row = eligible.iloc[0]
     rate = float(row["OBS_VALUE"])
     actual_date = row["TIME_PERIOD"]
     return rate, actual_date
+
+
+def fetch_usdeur_range(
+    start_date: datetime.date, end_date: datetime.date
+) -> dict[datetime.date, float]:
+    """
+    Fetch all ECB USD/EUR reference rates between start_date and end_date (inclusive).
+
+    Returns a dict mapping date -> rate (USD per EUR).
+    This is much more efficient than calling fetch_usdeur_for_date() for every trade date,
+    as it makes a single API call.
+    """
+    url = (
+        f"{_ECB_API_BASE}/{_SERIES_KEY}"
+        f"?startPeriod={start_date.isoformat()}"
+        f"&endPeriod={end_date.isoformat()}"
+        f"&format=csvdata"
+    )
+
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return {}
+
+    content = resp.text.strip()
+    if not content:
+        return {}
+
+    try:
+        df = pd.read_csv(io.StringIO(content))
+    except Exception:
+        return {}
+
+    if df.empty or "TIME_PERIOD" not in df.columns or "OBS_VALUE" not in df.columns:
+        return {}
+
+    df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"]).dt.date
+    return dict(zip(df["TIME_PERIOD"], df["OBS_VALUE"].astype(float)))

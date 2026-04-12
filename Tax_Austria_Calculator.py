@@ -51,14 +51,35 @@ with col1:
                 if "error" in tax_data:
                     st.error(f"Errore durante l'estrazione: {tax_data['error']}")
                 else:
+                    meldedatum = tax_data.get("meldedatum")
                     st.session_state["oekb_kest_val"] = tax_data.get("kest")
                     st.session_state["oekb_fonds_val"] = tax_data.get("fondsergebnis")
-                    st.session_state["oekb_meldedatum"] = tax_data.get("meldedatum")
-                    
-                    if tax_data.get("kest") is not None and tax_data.get("fondsergebnis") is not None:
-                        st.success(f"Dati estratti con successo: KESt={tax_data['kest']} | Fondsergebnis={tax_data['fondsergebnis']} (Data: {tax_data['meldedatum']})")
+                    st.session_state["oekb_meldedatum"] = meldedatum
+
+                    # Automate ECB rate fetch
+                    if meldedatum:
+                        with st.spinner(
+                            f"Fetching ECB USD/EUR rate for {meldedatum}..."
+                        ):
+                            try:
+                                dt = datetime.datetime.strptime(
+                                    meldedatum, "%Y-%m-%d"
+                                ).date()
+                                rate, actual_date = fetch_usdeur_for_date(dt)
+                                if rate:
+                                    st.session_state["ecb_usdeur"] = rate
+                            except Exception:
+                                pass
+
+                    if (
+                        tax_data.get("kest") is not None
+                        and tax_data.get("fondsergebnis") is not None
+                    ):
+                        st.success(f"Dati estratti con successo! (Data: {meldedatum})")
                     else:
-                        st.warning("⚠️ Estrazione parziale. Controlla manualmente i dati sulla pagina OeKB.")
+                        st.warning(
+                            "⚠️ Estrazione parziale. Controlla manualmente i dati sulla pagina OeKB."
+                        )
             else:
                 st.error("Nessun dato o risposta vuota dal server.")
 
@@ -86,7 +107,8 @@ with col1:
 # ── Column 2: KESt / Fondsergebnis / USD-EUR rate ───────────────────────────
 with col2:
     val_kest = st.session_state.get("oekb_kest_val", 0.0)
-    if val_kest is None: val_kest = 0.0
+    if val_kest is None:
+        val_kest = 0.0
     oekb_kest = st.number_input(
         "Österreichische KESt (USD)",
         min_value=0.0,
@@ -94,9 +116,10 @@ with col2:
         step=0.00001,
         format="%.5f",
     )
-    
+
     val_fonds = st.session_state.get("oekb_fonds_val", 0.0)
-    if val_fonds is None: val_fonds = 0.0
+    if val_fonds is None:
+        val_fonds = 0.0
     fondsergebnis = st.number_input(
         "Fondsergebnis der Meldeperiode (USD)",
         min_value=0.0,
@@ -105,16 +128,25 @@ with col2:
         format="%.5f",
     )
 
-    st.subheader("USD/EUR Exchange Rate (ECB)")
+    st.subheader("EUR/USD Exchange Rate (ECB)")
 
     # Date picker – pre-fills from OeKB Meldedatum if available
     auto_date_str = st.session_state.get("oekb_meldedatum")
     default_date = datetime.date.today()
     if auto_date_str:
         try:
-            default_date = datetime.datetime.strptime(auto_date_str.strip(), "%d.%m.%Y").date()
+            # New scraper uses YYYY-MM-DD
+            default_date = datetime.datetime.strptime(
+                auto_date_str.strip(), "%Y-%m-%d"
+            ).date()
         except Exception:
-            pass
+            try:
+                # Fallback for old format if session state was saved before update
+                default_date = datetime.datetime.strptime(
+                    auto_date_str.strip(), "%d.%m.%Y"
+                ).date()
+            except Exception:
+                pass
 
     meldedatum_date = st.date_input(
         "OeKB Meldedatum (date of the official OeKB publication)",
@@ -142,12 +174,14 @@ with col2:
             # Store in session state so the number_input below picks it up
             st.session_state["ecb_usdeur"] = fetched_rate
         else:
-            st.error("❌ Could not fetch ECB rate. Check your internet connection or try another date.")
+            st.error(
+                "❌ Could not fetch ECB rate. Check your internet connection or try another date."
+            )
 
     # The actual exchange rate field – pre-filled from session state if fetched
     default_usdeur = st.session_state.get("ecb_usdeur", 1.0)
     usdeur = st.number_input(
-        "USD/EUR Exchange Rate (editable)",
+        "EUR/USD Exchange Rate (editable)",
         min_value=0.0001,
         value=default_usdeur,
         step=0.00001,
@@ -163,34 +197,52 @@ with col2:
 
 # ── Results ──────────────────────────────────────────────────────────────────
 st.header("Results")
-if shares > 0 and usdeur > 0:
-    # All KeSt / Fondsergebnis values come from OeKB in USD.
-    # We divide by usdeur (USD per 1 EUR) to convert to EUR.
-    capital_gain_usd     = oekb_kest * shares                    # USD
-    capital_gain_eur     = capital_gain_usd / usdeur             # EUR
-    taxable_etf_gain_eur = value_year_after - value_year_before  # already in EUR
 
-    tax_paid_eur = capital_gain_eur  # same thing, just clearer alias
+if usdeur > 0:
+    # Per-share calculations (independent of number of shares)
+    kest_eur = oekb_kest / usdeur
+    fondsergebnis_eur = fondsergebnis / usdeur
 
-    percentage_tax_paid = (
-        (oekb_kest * 100) / (taxable_etf_gain_eur * usdeur)
-        if taxable_etf_gain_eur and usdeur
-        else 0
-    )
+    st.subheader("Per-Share Tax Data")
+    col_per1, col_per2 = st.columns(2)
+    with col_per1:
+        st.metric("KESt (USD)", f"{oekb_kest:,.5f} USD")
+        st.metric("KESt (EUR)", f"{kest_eur:,.5f} EUR")
+    with col_per2:
+        st.metric("Fondsergebnis (USD)", f"{fondsergebnis:,.5f} USD")
+        st.metric("Fondsergebnis (EUR)", f"{fondsergebnis_eur:,.5f} EUR")
 
-    # Fondsergebnis is in USD → convert to EUR before adding to the EUR cost base
-    etf_new_average_cost = etf_initial_cost + (fondsergebnis / usdeur)
+    if shares > 0:
+        st.divider()
+        st.subheader("Portfolio Calculations")
 
-    col_r1, col_r2, col_r3 = st.columns(3)
-    with col_r1:
-        st.metric("Capital Gain (USD)", f"{capital_gain_usd:,.5f} USD")
-        st.metric("Capital Gain (EUR)", f"{capital_gain_eur:,.5f} EUR")
-    with col_r2:
-        st.metric("Taxable ETF Gain (EUR)", f"{taxable_etf_gain_eur:,.5f} EUR")
-        st.metric("Tax Paid (EUR)", f"{tax_paid_eur:,.5f} EUR")
-    with col_r3:
-        st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f} %")
-        st.metric("ETF New Average Cost (EUR)", f"{etf_new_average_cost:,.5f} EUR")
+        capital_gain_usd = oekb_kest * shares  # USD
+        capital_gain_eur = capital_gain_usd / usdeur  # EUR
+        taxable_etf_gain_eur = value_year_after - value_year_before  # already in EUR
+
+        percentage_tax_paid = (
+            (oekb_kest * 100) / (taxable_etf_gain_eur * usdeur)
+            if taxable_etf_gain_eur and usdeur
+            else 0
+        )
+
+        # Fondsergebnis is in USD → convert to EUR before adding to the EUR cost base
+        etf_new_average_cost = etf_initial_cost + (fondsergebnis / usdeur)
+
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            st.metric("Total Capital Gain (USD)", f"{capital_gain_usd:,.2f} USD")
+            st.metric("Total Capital Gain (EUR)", f"{capital_gain_eur:,.2f} EUR")
+        with col_r2:
+            st.metric("Taxable ETF Gain (EUR)", f"{taxable_etf_gain_eur:,.2f} EUR")
+            st.metric("Tax Paid Total (EUR)", f"{capital_gain_eur:,.2f} EUR")
+        with col_r3:
+            st.metric("New Average Cost (EUR)", f"{etf_new_average_cost:,.5f} EUR")
+            st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f} %")
+    else:
+        st.info(
+            "💡 Inserisci il **Number of Shares** per vedere i calcoli totali del portafoglio."
+        )
 
     # ── Conversion summary box ─────────────────────────────────────────────
     st.info(
@@ -199,7 +251,7 @@ if shares > 0 and usdeur > 0:
         f"Division applied: USD values ÷ {usdeur:.5f} = EUR values"
     )
 else:
-    st.info("Please enter all required values (Shares > 0 and a valid USD/EUR rate) to see the results.")
+    st.info("Please enter a valid USD/EUR rate to see the results.")
 
 st.caption(
     "This dashboard is for informational purposes only. Always consult a tax professional for your specific situation."
