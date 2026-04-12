@@ -1,5 +1,8 @@
+import datetime
+
 import streamlit as st
 
+from ecb_fx import fetch_usdeur_for_date
 from oekb_scraper import fetch_oekb_kest
 
 st.set_page_config(page_title="ETF Tax Calculator Austria", layout="wide")
@@ -17,21 +20,23 @@ $$
 \text{Taxable ETF Gain} = \text{Value}_{\text{Year After}} - \text{Value}_{\text{Year Before}}
 $$
 $$
-\text{Tax Paid} = \frac{\text{Capital Gain}}{\text{USD/EUR}}
+\text{Tax Paid (EUR)} = \frac{\text{Capital Gain (USD)}}{\text{USD/EUR}}
 $$
 $$
 \text{Percentage Tax Paid} = \frac{\text{Österreichische KESt} \times 100}{\text{Taxable ETF Gain} \times \text{USD/EUR}}
 $$
 $$
-\text{ETF New Average Cost} = \text{ETF Initial Cost} + (\text{Fondsergebnis} \times \text{USD/EUR})
+\text{ETF New Average Cost} = \text{ETF Initial Cost} + \frac{\text{Fondsergebnis (USD)}}{\text{USD/EUR}}
 $$
 
-*USD/EUR Must be evaluated in the day when OekB data is released.*
+*USD/EUR is the ECB reference rate published on the OeKB Meldedatum.*
 """
 )
 
 st.header("Input Data")
 col1, col2 = st.columns(2)
+
+# ── Column 1: ISIN / shares / ETF values ────────────────────────────────────
 with col1:
     isin = st.text_input("ETF ISIN", value="")
     kest_auto = None
@@ -48,6 +53,7 @@ with col1:
                 st.success(f"KESt found: {kest_auto} (Meldedatum: {meldedatum})")
             else:
                 st.warning("KESt value not found for this ISIN.")
+
     shares = st.number_input(
         "Number of Shares", min_value=0.0, value=0.0, step=0.00001, format="%.5f"
     )
@@ -68,11 +74,13 @@ with col1:
         step=0.00001,
         format="%.5f",
     )
+
+# ── Column 2: KESt / Fondsergebnis / USD-EUR rate ───────────────────────────
 with col2:
     oekb_kest = st.number_input(
         "Österreichische KESt (USD)",
         min_value=0.0,
-        value=0.0,
+        value=float(kest_auto) if kest_auto else 0.0,
         step=0.00001,
         format="%.5f",
     )
@@ -83,37 +91,94 @@ with col2:
         step=0.00001,
         format="%.5f",
     )
+
+    st.subheader("USD/EUR Exchange Rate (ECB)")
+
+    # Date picker – defaults to today; user should set it to the OeKB Meldedatum
+    meldedatum_date = st.date_input(
+        "OeKB Meldedatum (date of the official OeKB publication)",
+        value=datetime.date.today(),
+        help=(
+            "Select the OeKB Meldedatum. The ECB reference rate published on that "
+            "day (or the nearest prior business day) will be fetched automatically."
+        ),
+    )
+
+    # Auto-fetch button
+    fetched_rate: float | None = None
+    if st.button("🔄 Fetch ECB Rate for this date", key="fetch_ecb"):
+        with st.spinner(f"Fetching ECB USD/EUR rate for {meldedatum_date}…"):
+            fetched_rate, actual_date = fetch_usdeur_for_date(meldedatum_date)
+        if fetched_rate is not None:
+            if actual_date != meldedatum_date:
+                st.info(
+                    f"ℹ️ No ECB rate available for {meldedatum_date} (weekend/holiday). "
+                    f"Using the closest prior business day: **{actual_date}**."
+                )
+            st.success(
+                f"✅ ECB reference rate on {actual_date}: **{fetched_rate:.5f} USD/EUR**"
+            )
+            # Store in session state so the number_input below picks it up
+            st.session_state["ecb_usdeur"] = fetched_rate
+        else:
+            st.error("❌ Could not fetch ECB rate. Check your internet connection or try another date.")
+
+    # The actual exchange rate field – pre-filled from session state if fetched
+    default_usdeur = st.session_state.get("ecb_usdeur", 1.0)
     usdeur = st.number_input(
-        "USD/EUR Exchange Rate",
+        "USD/EUR Exchange Rate (editable)",
         min_value=0.0001,
-        value=1.0,
+        value=default_usdeur,
         step=0.00001,
         format="%.5f",
+        help="Automatically populated when you click the fetch button, but you can override it manually.",
     )
+
     st.markdown(
-        "[Get USD/EUR exchange rate from ECB](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html)",
+        "[📊 ECB exchange rate chart (USD)](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/"
+        "euro_reference_exchange_rates/html/eurofxref-graph-usd.en.html)",
         unsafe_allow_html=True,
     )
 
+# ── Results ──────────────────────────────────────────────────────────────────
 st.header("Results")
 if shares > 0 and usdeur > 0:
-    capital_gain = oekb_kest * shares
-    taxable_etf_gain = value_year_after - value_year_before
-    tax_paid = capital_gain / usdeur if usdeur else 0
+    # All KeSt / Fondsergebnis values come from OeKB in USD.
+    # We divide by usdeur (USD per 1 EUR) to convert to EUR.
+    capital_gain_usd     = oekb_kest * shares                    # USD
+    capital_gain_eur     = capital_gain_usd / usdeur             # EUR
+    taxable_etf_gain_eur = value_year_after - value_year_before  # already in EUR
+
+    tax_paid_eur = capital_gain_eur  # same thing, just clearer alias
+
     percentage_tax_paid = (
-        (oekb_kest * 100) / (taxable_etf_gain * usdeur)
-        if taxable_etf_gain and usdeur
+        (oekb_kest * 100) / (taxable_etf_gain_eur * usdeur)
+        if taxable_etf_gain_eur and usdeur
         else 0
     )
-    etf_new_average_cost = etf_initial_cost + (fondsergebnis * usdeur)
 
-    st.metric("Capital Gain (USD)", f"{capital_gain:,.5f}")
-    st.metric("Taxable ETF Gain (EUR)", f"{taxable_etf_gain:,.5f}")
-    st.metric("Tax Paid (EUR)", f"{tax_paid:,.5f}")
-    st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f}")
-    st.metric("ETF New Average Cost (EUR)", f"{etf_new_average_cost:,.5f}")
+    # Fondsergebnis is in USD → convert to EUR before adding to the EUR cost base
+    etf_new_average_cost = etf_initial_cost + (fondsergebnis / usdeur)
+
+    col_r1, col_r2, col_r3 = st.columns(3)
+    with col_r1:
+        st.metric("Capital Gain (USD)", f"{capital_gain_usd:,.5f} USD")
+        st.metric("Capital Gain (EUR)", f"{capital_gain_eur:,.5f} EUR")
+    with col_r2:
+        st.metric("Taxable ETF Gain (EUR)", f"{taxable_etf_gain_eur:,.5f} EUR")
+        st.metric("Tax Paid (EUR)", f"{tax_paid_eur:,.5f} EUR")
+    with col_r3:
+        st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f} %")
+        st.metric("ETF New Average Cost (EUR)", f"{etf_new_average_cost:,.5f} EUR")
+
+    # ── Conversion summary box ─────────────────────────────────────────────
+    st.info(
+        f"**Exchange rate used:** 1 EUR = {usdeur:.5f} USD  "
+        f"(ECB reference rate for {meldedatum_date})\n\n"
+        f"Division applied: USD values ÷ {usdeur:.5f} = EUR values"
+    )
 else:
-    st.info("Please enter all required values to see the results.")
+    st.info("Please enter all required values (Shares > 0 and a valid USD/EUR rate) to see the results.")
 
 st.caption(
     "This dashboard is for informational purposes only. Always consult a tax professional for your specific situation."
