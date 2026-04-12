@@ -3,7 +3,7 @@ import datetime
 import streamlit as st
 
 from ecb_fx import fetch_usdeur_for_date
-from oekb_scraper import fetch_oekb_kest
+from oekb_scraper import fetch_oekb_tax_data
 
 st.set_page_config(page_title="ETF Tax Calculator Austria", layout="wide")
 st.title("ETF TAX Calculator AUSTRIA")
@@ -39,20 +39,28 @@ col1, col2 = st.columns(2)
 # ── Column 1: ISIN / shares / ETF values ────────────────────────────────────
 with col1:
     isin = st.text_input("ETF ISIN", value="")
-    kest_auto = None
-    meldedatum = None
     if isin:
         oekb_url = f"https://my.oekb.at/kapitalmarkt-services/kms-output/fonds-info/sd/af/f?isin={isin}"
         st.markdown(
             f"[Open OeKB page for this ISIN]({oekb_url})", unsafe_allow_html=True
         )
-        if st.button("Fetch KESt from OeKB", key="fetch_kest"):
-            with st.spinner("Fetching KESt from OeKB..."):
-                kest_auto, meldedatum, stmId = fetch_oekb_kest(isin)
-            if kest_auto is not None:
-                st.success(f"KESt found: {kest_auto} (Meldedatum: {meldedatum})")
+        if st.button("Fetch Data from OeKB", key="fetch_kest"):
+            with st.spinner("Fetching data from OeKB..."):
+                tax_data = fetch_oekb_tax_data(isin)
+            if tax_data:
+                if "error" in tax_data:
+                    st.error(f"Errore durante l'estrazione: {tax_data['error']}")
+                else:
+                    st.session_state["oekb_kest_val"] = tax_data.get("kest")
+                    st.session_state["oekb_fonds_val"] = tax_data.get("fondsergebnis")
+                    st.session_state["oekb_meldedatum"] = tax_data.get("meldedatum")
+                    
+                    if tax_data.get("kest") is not None and tax_data.get("fondsergebnis") is not None:
+                        st.success(f"Dati estratti con successo: KESt={tax_data['kest']} | Fondsergebnis={tax_data['fondsergebnis']} (Data: {tax_data['meldedatum']})")
+                    else:
+                        st.warning("⚠️ Estrazione parziale. Controlla manualmente i dati sulla pagina OeKB.")
             else:
-                st.warning("KESt value not found for this ISIN.")
+                st.error("Nessun dato o risposta vuota dal server.")
 
     shares = st.number_input(
         "Number of Shares", min_value=0.0, value=0.0, step=0.00001, format="%.5f"
@@ -77,27 +85,40 @@ with col1:
 
 # ── Column 2: KESt / Fondsergebnis / USD-EUR rate ───────────────────────────
 with col2:
+    val_kest = st.session_state.get("oekb_kest_val", 0.0)
+    if val_kest is None: val_kest = 0.0
     oekb_kest = st.number_input(
         "Österreichische KESt (USD)",
         min_value=0.0,
-        value=float(kest_auto) if kest_auto else 0.0,
+        value=float(val_kest),
         step=0.00001,
         format="%.5f",
     )
+    
+    val_fonds = st.session_state.get("oekb_fonds_val", 0.0)
+    if val_fonds is None: val_fonds = 0.0
     fondsergebnis = st.number_input(
         "Fondsergebnis der Meldeperiode (USD)",
         min_value=0.0,
-        value=0.0,
+        value=float(val_fonds),
         step=0.00001,
         format="%.5f",
     )
 
     st.subheader("USD/EUR Exchange Rate (ECB)")
 
-    # Date picker – defaults to today; user should set it to the OeKB Meldedatum
+    # Date picker – pre-fills from OeKB Meldedatum if available
+    auto_date_str = st.session_state.get("oekb_meldedatum")
+    default_date = datetime.date.today()
+    if auto_date_str:
+        try:
+            default_date = datetime.datetime.strptime(auto_date_str.strip(), "%d.%m.%Y").date()
+        except Exception:
+            pass
+
     meldedatum_date = st.date_input(
         "OeKB Meldedatum (date of the official OeKB publication)",
-        value=datetime.date.today(),
+        value=default_date,
         help=(
             "Select the OeKB Meldedatum. The ECB reference rate published on that "
             "day (or the nearest prior business day) will be fetched automatically."
