@@ -4,10 +4,10 @@ import io
 import re
 
 import streamlit as st
+from fpdf import FPDF
 
 from ecb_fx import fetch_usdeur_for_date
 from oekb_scraper import fetch_oekb_tax_data
-
 
 def _safe_float_csv(val) -> float:
     """Convert string from IBKR CSV to float, handling commas as thousands separators."""
@@ -22,6 +22,34 @@ def _safe_float_csv(val) -> float:
         return float(cleaned) if cleaned else 0.0
     except (ValueError, TypeError):
         return 0.0
+
+
+def create_pdf_report(report_data):
+    """
+    Generates a PDF report using fpdf2.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    
+    # Header
+    pdf.cell(0, 10, "ETF Tax Report - Austria", ln=True, align="C")
+    pdf.ln(10)
+    
+    # Table-like structure
+    pdf.set_font("Arial", "", 12)
+    for key, value in report_data.items():
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(60, 10, f"{key}:", border=0)
+        pdf.set_font("Arial", "", 12)
+        pdf.cell(0, 10, f"{value}", border=0, ln=True)
+    
+    pdf.ln(10)
+    pdf.set_font("Arial", "I", 10)
+    pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+    pdf.cell(0, 10, "Disclaimer: This report is for informational purposes only.", ln=True)
+    
+    return bytes(pdf.output())
 
 
 def extract_data_from_ibkr_csv(file, target_isin):
@@ -269,7 +297,7 @@ $$
 \text{Tax Paid (EUR)} = \frac{\text{Capital Gain (USD)}}{\text{USD/EUR}}
 $$
 $$
-\text{Percentage Tax Paid} = \frac{\text{Österreichische KESt} \times 100}{\text{Taxable ETF Gain} \times \text{USD/EUR}}
+\text{Percentage Tax Paid} = \frac{\text{Österreichische KESt} \times 100}{\text{abs}(\text{Taxable ETF Gain}) \times \text{USD/EUR}}
 $$
 $$
 \text{ETF New Average Cost} = \text{ETF Initial Cost} + \frac{\text{Fondsergebnis (USD)}}{\text{USD/EUR}}
@@ -359,6 +387,27 @@ with col1:
                 st.session_state["initial_cost_input"] = data["initial_cost"]
                 st.session_state["value_before_input"] = data["initial_cost"]
                 st.session_state["value_after_input"] = data["value_after"]
+                
+                # Try to extract the date from the report
+                # Usually in row 0: ['Rendiconto...', 'Data', '2025-01-01 a 2025-06-27']
+                # We want the second date.
+                try:
+                    uploaded_csv.seek(0)
+                    content = uploaded_csv.read().decode("utf-8")
+                except:
+                    uploaded_csv.seek(0)
+                    content = uploaded_csv.read().decode("latin-1")
+                
+                report_date = datetime.date.today().strftime("%d-%m-%Y")
+                for line in content.splitlines()[:10]:
+                    if "Data" in line and " a " in line:
+                        match = re.search(r'a\s+(\d{4}-\d{2}-\d{2})', line)
+                        if match:
+                            y, m, d = match.group(1).split("-")
+                            report_date = f"{d}-{m}-{y}"
+                            break
+                st.session_state["report_date"] = report_date
+                
                 return data
             return None
 
@@ -581,13 +630,14 @@ if usdeur > 0:
         taxable_etf_gain_eur = value_year_after - value_year_before  # already in EUR
 
         percentage_tax_paid = (
-            (oekb_kest * 100) / (taxable_etf_gain_eur * usdeur)
+            (oekb_kest * 100) / (abs(taxable_etf_gain_eur) * usdeur)
             if taxable_etf_gain_eur and usdeur
             else 0
         )
 
         # Fondsergebnis is in USD → convert to EUR before adding to the EUR cost base
         etf_new_average_cost = etf_initial_cost + (fondsergebnis / usdeur)
+        etf_new_total_value = etf_new_average_cost * shares
 
         col_r1, col_r2, col_r3 = st.columns(3)
         with col_r1:
@@ -598,7 +648,57 @@ if usdeur > 0:
             st.metric("Tax Paid Total (EUR)", f"{capital_gain_eur:,.2f} EUR")
         with col_r3:
             st.metric("New Average Cost (EUR)", f"{etf_new_average_cost:,.5f} EUR")
-            st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f} %")
+            st.metric("New Total Value (EUR)", f"{etf_new_total_value:,.2f} EUR")
+
+        # Move Percentage metric here
+        st.metric("Percentage Tax Paid (%)", f"{percentage_tax_paid:,.5f} %")
+
+        st.divider()
+        st.subheader("Final JSON Report Summary")
+        
+        # Prepare JSON report
+        # Priority: 1. OeKB Meldedatum, 2. CSV Report Date, 3. Today
+        oekb_date_raw = st.session_state.get("oekb_meldedatum")
+        if oekb_date_raw:
+            try:
+                y, m, d = oekb_date_raw.split("-")
+                report_date = f"{d}-{m}-{y}"
+            except:
+                report_date = st.session_state.get("report_date", datetime.date.today().strftime("%d-%m-%Y"))
+        else:
+            report_date = st.session_state.get("report_date", datetime.date.today().strftime("%d-%m-%Y"))
+        json_report = {
+            "Instrument": st.session_state.get("isin", "Unknown"),
+            "Date": report_date,
+            "Number of Shares": round(shares, 5),
+            "ETF Initial Cost (EUR)": round(etf_initial_cost, 5),
+            "ETF Value Year After (EUR)": round(value_year_after, 5),
+            "New Average Cost (EUR)": round(etf_new_average_cost, 5),
+            "New Total Value (EUR)": round(etf_new_total_value, 2),
+            "Capital Gain To Pay (EUR)": round(capital_gain_eur, 2)
+        }
+        
+        st.json(json_report)
+        
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            # Download button for JSON
+            st.download_button(
+                label="Download JSON Report",
+                data=str(json_report).replace("'", '"'),
+                file_name=f"ETF_Tax_Report_{report_date}.json",
+                mime="application/json"
+            )
+        
+        with col_dl2:
+            # Download button for PDF
+            pdf_bytes = create_pdf_report(json_report)
+            st.download_button(
+                label="Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"ETF_Tax_Report_{report_date}.pdf",
+                mime="application/pdf"
+            )
     else:
         st.info(
             "💡 Inserisci il **Number of Shares** per vedere i calcoli totali del portafoglio."
