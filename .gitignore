@@ -1,6 +1,6 @@
 modules/__pycache__/*.pyc
 *.png
 .venv
-__pycache__/*
+*__pycache__/*
 *scratch*
 *.json
