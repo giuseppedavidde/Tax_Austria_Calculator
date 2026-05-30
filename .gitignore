@@ -4,3 +4,4 @@ modules/__pycache__/*.pyc
 *__pycache__/*
 *scratch*
 *.json
+*.env
